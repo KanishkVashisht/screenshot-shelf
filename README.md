@@ -2,9 +2,9 @@
 
 A small native macOS menu bar app for grabbing recent screenshots.
 
-**Hold ⌘⇧S → drag a screenshot → release to close.**
+**Click the menu bar icon to open the shelf, or hold ⌘⇧S → drag a screenshot → release to close.**
 
-The shelf stays visible only while Command, Shift, and S are held. Releasing any of them hides it immediately. If you have already started a drag, keep holding the mouse button and finish dropping the file after the shelf disappears.
+The shelf stays visible only while the shortcut is held. Releasing any shortcut key hides it immediately. If you have already started a drag, keep holding the mouse button and finish dropping the file after the shelf disappears. You can also drag directly from the menu bar icon to drag the latest screenshot without opening the shelf.
 
 ## Install
 
@@ -12,8 +12,8 @@ Requires **macOS 13 or newer**. Universal downloads support Apple silicon and In
 
 1. Download the DMG from [Releases](https://github.com/KanishkVashisht/screenshot-shelf/releases/latest).
 2. Open it and drag **Screenshot Shelf.app** into **Applications**.
-3. Launch the app. Click its photo icon in the menu bar for settings.
-4. Hold **⌘⇧S** to view your recent screenshots.
+3. Launch the app. Click its photo icon in the menu bar to view your recent screenshots.
+4. Hold **⌘⇧S** (or your configured shortcut) to view the shelf without using the mouse.
 
 The downloadable build is ad-hoc signed and **not Apple-notarized**. macOS may require explicit approval in **System Settings → Privacy & Security** before opening it. Building locally is also supported.
 
@@ -22,15 +22,16 @@ If macOS asks for Desktop access, allow it to load screenshots, or use **Choose 
 ## How it works
 
 - Shows up to 30 screenshots, newest first, from the macOS screenshot save location (Desktop by default), or a folder you choose.
-- Dragging supplies a real file URL and permits copying; the original stays in place.
+- Left-clicking a thumbnail copies it to the clipboard. Dragging supplies a real file URL and permits copying; the original stays in place.
 - Release **S**, **Command**, or **Shift** to close the shelf. **Esc** or clicking outside also dismisses it until the next press.
-- The menu bar icon opens settings, including folder selection, Launch at Login, and Quit.
+- Pressing the menu bar icon toggles the shelf open or closed. Moving far enough during the same press starts a drag of the latest screenshot and hides the shelf; right-clicking opens settings, including folder selection, Launch at Login, and Quit.
+- Choose **Change Shortcut…** in Settings to configure the global shortcut, or choose **Clear** in the shortcut dialog to disable keyboard activation. The menu-bar icon remains available.
 - Arrow keys select screenshots while the shelf is open. Return or double-click opens the selected file. Right-click a thumbnail for additional actions.
 - Scans refresh every two seconds while visible. Thumbnails are cached and refreshed when files change.
 
 Screenshots are recognized by macOS metadata or common screenshot filename prefixes. The app reads only the selected folder, without subfolders. Renamed images without screenshot metadata and screenshots saved only to the clipboard are not included.
 
-⌘⇧S belongs to Screenshot Shelf while it runs, superseding app shortcuts using the same keys. If another global shortcut already owns it, the app reports the conflict and offers **Retry Shortcut** in the menu.
+The configured shortcut belongs to Screenshot Shelf while it runs, superseding app shortcuts using the same keys. If another global shortcut already owns it, the app reports the conflict and offers **Retry Shortcut** in the menu.
 
 ## Privacy
 

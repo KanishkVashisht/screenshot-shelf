@@ -1,5 +1,180 @@
 import AppKit
 
+final class StatusItemView: NSView, NSDraggingSource {
+    var image: NSImage? { didSet { needsDisplay = true } }
+    var screenshotProvider: (() -> Screenshot?)?
+    var onClick: (() -> Void)?
+    var onRightClick: (() -> Void)?
+    var onDragStart: (() -> Void)?
+    private var pressOrigin = NSPoint.zero
+    private var pressEventNumber = 0
+    private var pressScreenshot: Screenshot?
+    private var pressTimer: Timer?
+    private var dragPanel: StatusItemDragPanel?
+    private var dragPump: StatusItemDragPump?
+    private var isDragging = false
+
+    override func mouseDown(with event: NSEvent) {
+        stopPressTracking()
+        pressOrigin = NSEvent.mouseLocation
+        pressEventNumber = event.eventNumber
+        pressScreenshot = screenshotProvider?()
+        isDragging = false
+        onClick?()
+        let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in self?.samplePress() }
+        pressTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    override func rightMouseDown(with event: NSEvent) { onRightClick?() }
+
+    override func mouseDragged(with event: NSEvent) {
+        samplePress()
+    }
+
+    private func samplePress() {
+        guard !isDragging else { return }
+        guard NSEvent.pressedMouseButtons & 1 != 0 else { stopPressTracking(); return }
+        let point = NSEvent.mouseLocation
+        guard hypot(point.x - pressOrigin.x, point.y - pressOrigin.y) > 4,
+              let screenshot = pressScreenshot,
+              FileManager.default.fileExists(atPath: screenshot.url.path) else { return }
+        startPhysicalDrag(screenshot, at: point)
+    }
+
+    private func startPhysicalDrag(_ screenshot: Screenshot, at point: NSPoint) {
+        stopPressTracking(clearScreenshot: false)
+        isDragging = true
+        onDragStart?()
+        let preview = screenshot.thumbnail ?? NSWorkspace.shared.icon(forFile: screenshot.url.path)
+        let size = fittedDragSize(for: preview)
+        let panel = StatusItemDragPanel(pointer: point, size: size)
+        dragPanel = panel
+        panel.orderFrontRegardless()
+        let item = NSDraggingItem(pasteboardWriter: screenshot.url as NSURL)
+        item.setDraggingFrame(NSRect(origin: .zero, size: size), contents: preview)
+        guard let view = panel.contentView,
+              let event = NSEvent.mouseEvent(with: .leftMouseDragged,
+                                             location: panel.convertPoint(fromScreen: point),
+                                             modifierFlags: NSEvent.modifierFlags,
+                                             timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: panel.windowNumber,
+                                             context: nil,
+                                             eventNumber: pressEventNumber,
+                                             clickCount: 1,
+                                             pressure: 1) else { finishPhysicalDrag(); return }
+        DispatchQueue.main.async { [weak self, weak panel, weak view] in
+            guard let self, let panel, let view, self.dragPanel === panel,
+                  NSEvent.pressedMouseButtons & 1 != 0 else { self?.finishPhysicalDrag(); return }
+            let session = view.beginDraggingSession(with: [item], event: event, source: self)
+            session.animatesToStartingPositionsOnCancelOrFail = true
+            session.draggingFormation = .none
+            let pump = StatusItemDragPump(window: panel, eventNumber: event.eventNumber, origin: point)
+            self.dragPump = pump
+            pump.start()
+        }
+    }
+
+    private func fittedDragSize(for image: NSImage) -> NSSize {
+        guard image.size.width > 0, image.size.height > 0 else { return NSSize(width: 64, height: 64) }
+        let scale = min(96 / image.size.width, 96 / image.size.height, 1)
+        return NSSize(width: max(1, image.size.width * scale), height: max(1, image.size.height * scale))
+    }
+
+    private func stopPressTracking(clearScreenshot: Bool = true) {
+        pressTimer?.invalidate()
+        pressTimer = nil
+        if clearScreenshot { pressScreenshot = nil }
+    }
+
+    private func finishPhysicalDrag() {
+        stopPressTracking()
+        dragPump?.stop()
+        dragPump = nil
+        dragPanel?.close()
+        dragPanel = nil
+        isDragging = false
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let image else { return }
+        let size = NSSize(width: 18, height: 18)
+        let rect = NSRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2, width: size.width, height: size.height)
+        let configuration = NSImage.SymbolConfiguration(paletteColors: [.labelColor])
+        (image.withSymbolConfiguration(configuration) ?? image).draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: false, hints: [.interpolation: NSImageInterpolation.high])
+    }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation { .copy }
+    func ignoreModifierKeys(for session: NSDraggingSession) -> Bool { true }
+    func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) { finishPhysicalDrag() }
+    deinit { stopPressTracking(); dragPump?.stop() }
+}
+
+final class StatusItemDragPanel: NSPanel {
+    init(pointer: NSPoint, size: NSSize) {
+        let origin = NSPoint(x: pointer.x - size.width / 2, y: pointer.y - size.height / 2)
+        super.init(contentRect: NSRect(origin: origin, size: size), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        isReleasedWhenClosed = false
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = false
+        level = .statusBar
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        contentView = NSView(frame: NSRect(origin: .zero, size: size))
+    }
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
+final class StatusItemDragPump {
+    private weak var window: NSWindow?
+    private let eventNumber: Int
+    private var lastLocation: NSPoint
+    private var timer: Timer?
+
+    init(window: NSWindow, eventNumber: Int, origin: NSPoint) {
+        self.window = window
+        self.eventNumber = eventNumber
+        self.lastLocation = origin
+    }
+
+    func start() {
+        let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in self?.tick() }
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    func stop() { timer?.invalidate(); timer = nil }
+
+    private func tick() {
+        guard let window else { stop(); return }
+        let point = NSEvent.mouseLocation
+        if point != lastLocation {
+            lastLocation = point
+            post(.leftMouseDragged, in: window, point: point, pressure: 1)
+        }
+        if NSEvent.pressedMouseButtons & 1 == 0 {
+            post(.leftMouseUp, in: window, point: point, pressure: 0)
+            stop()
+        }
+    }
+
+    private func post(_ type: NSEvent.EventType, in window: NSWindow, point: NSPoint, pressure: Float) {
+        guard let event = NSEvent.mouseEvent(with: type,
+                                             location: window.convertPoint(fromScreen: point),
+                                             modifierFlags: NSEvent.modifierFlags,
+                                             timestamp: ProcessInfo.processInfo.systemUptime,
+                                             windowNumber: window.windowNumber,
+                                             context: nil,
+                                             eventNumber: eventNumber,
+                                             clickCount: 1,
+                                             pressure: pressure) else { return }
+        NSApp.postEvent(event, atStart: false)
+    }
+
+    deinit { stop() }
+}
+
 final class FlippedView: NSView {
     override var isFlipped: Bool { true }
 }
@@ -20,6 +195,7 @@ final class ShelfPanel: NSPanel {
 final class ScreenshotCard: NSView, NSDraggingSource {
     let screenshot: Screenshot
     var onSelect: (() -> Void)?
+    var onCopy: (() -> Void)?
     var onDragStart: (() -> Void)?
     var onDragEnd: ((NSDragOperation) -> Void)?
     var selected = false { didSet { needsDisplay = true } }
@@ -32,7 +208,7 @@ final class ScreenshotCard: NSView, NSDraggingSource {
     init(screenshot: Screenshot, frame: NSRect) {
         self.screenshot = screenshot
         super.init(frame: frame)
-        toolTip = screenshot.url.lastPathComponent + "\nDrag to another app · Double-click to open"
+        toolTip = screenshot.url.lastPathComponent + "\nClick to copy · Drag to another app · Double-click to open"
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
         setAccessibilityLabel(screenshot.url.lastPathComponent)
@@ -90,9 +266,17 @@ final class ScreenshotCard: NSView, NSDraggingSource {
         downPoint = convert(event.locationInWindow, from: nil)
         onSelect?()
         window?.makeFirstResponder(self)
-        if event.clickCount == 2 { NSWorkspace.shared.open(screenshot.url) }
     }
-    override func mouseUp(with event: NSEvent) { downPoint = nil }
+    override func mouseUp(with event: NSEvent) {
+        guard downPoint != nil else { return }
+        downPoint = nil
+        if event.clickCount == 1 {
+            ScreenshotCard.copy(screenshot)
+            onCopy?()
+        } else if event.clickCount == 2 {
+            NSWorkspace.shared.open(screenshot.url)
+        }
+    }
     override func mouseDragged(with event: NSEvent) {
         guard let downPoint else { return }
         let point = convert(event.locationInWindow, from: nil)
@@ -138,6 +322,7 @@ final class ShelfController: NSObject, NSWindowDelegate {
     let panel: ShelfPanel
     private let subtitle = NSTextField(labelWithString: "Your latest captures, ready to drag.")
     private let footer = NSTextField(labelWithString: "Hold ⌘⇧S  ·  Drag a screenshot  ·  Release to close")
+    private let shortcutLabel = NSTextField(labelWithString: "⌘⇧S")
     private let scrollView = NSScrollView()
     private let document = FlippedView()
     private var cards: [ScreenshotCard] = []
@@ -181,12 +366,11 @@ final class ShelfController: NSObject, NSWindowDelegate {
         subtitle.frame = NSRect(x: 22, y: 47, width: 465, height: 18)
         root.addSubview(subtitle)
 
-        let shortcut = NSTextField(labelWithString: "Hold ⌘⇧S")
-        shortcut.font = .monospacedSystemFont(ofSize: 13, weight: .medium)
-        shortcut.textColor = .secondaryLabelColor
-        shortcut.alignment = .center
-        shortcut.frame = NSRect(x: 468, y: 26, width: 105, height: 22)
-        root.addSubview(shortcut)
+        shortcutLabel.font = .monospacedSystemFont(ofSize: 13, weight: .medium)
+        shortcutLabel.textColor = .secondaryLabelColor
+        shortcutLabel.alignment = .center
+        shortcutLabel.frame = NSRect(x: 468, y: 26, width: 105, height: 22)
+        root.addSubview(shortcutLabel)
         let settings = NSButton(image: NSImage(systemSymbolName: "gearshape", accessibilityDescription: "Settings")!, target: self, action: #selector(settingsClicked(_:)))
         settings.isBordered = false
         settings.frame = NSRect(x: 582, y: 21, width: 34, height: 32)
@@ -225,6 +409,11 @@ final class ShelfController: NSObject, NSWindowDelegate {
         document.scroll(.zero)
     }
 
+    func setShortcutName(_ name: String) {
+        shortcutLabel.stringValue = name
+        footer.stringValue = "Hold \(name)  ·  Drag a screenshot  ·  Release to close"
+    }
+
     func hide() {
         // Keep the views alive so a file drag can finish after the panel hides.
         panel.orderOut(nil)
@@ -239,7 +428,7 @@ final class ShelfController: NSObject, NSWindowDelegate {
         cards.removeAll()
         subtitle.stringValue = "\(scan.screenshots.count) recent screenshot\(scan.screenshots.count == 1 ? "" : "s") · \(scan.folder.lastPathComponent)"
         subtitle.toolTip = scan.folder.path
-        footer.stringValue = "Hold ⌘⇧S  ·  Drag a screenshot  ·  Release to close"
+        footer.stringValue = "Hold \(shortcutLabel.stringValue)  ·  Drag a screenshot  ·  Release to close"
         let rows = max(1, Int(ceil(Double(scan.screenshots.count) / 3.0)))
         document.frame = NSRect(x: 0, y: 0, width: 604, height: max(426, CGFloat(rows) * 152))
         if scan.screenshots.isEmpty {
@@ -255,6 +444,7 @@ final class ShelfController: NSObject, NSWindowDelegate {
             let frame = NSRect(x: CGFloat(index % 3) * 202 + 2, y: CGFloat(index / 3) * 152 + 2, width: 192, height: 142)
             let card = ScreenshotCard(screenshot: shot, frame: frame)
             card.onSelect = { [weak self] in self?.select(index) }
+            card.onCopy = { [weak self] in self?.footer.stringValue = "Copied. Paste into another app with ⌘V." }
             card.onDragStart = { [weak self] in self?.isDragging = true }
             card.onDragEnd = { [weak self] operation in
                 guard let self else { return }
